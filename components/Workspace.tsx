@@ -4,11 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type {
   ChatSource,
+  ConversationRow,
   DocumentRow,
   MessageRow,
+  ProjectRow,
 } from "@/lib/types";
 
-const LS_CONV = "orange_terminal_conversation_id";
+const LS_PROJECT = "orange_terminal_project_id";
+const LS_CONV_PREFIX = "orange_terminal_conversation_";
 
 type UploadUi =
   | { state: "idle" }
@@ -16,8 +19,12 @@ type UploadUi =
   | { state: "processing" };
 
 export function Workspace() {
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [documents, setDocuments] = useState<DocumentRow[]>([]);
-  const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+  const [focusedDocId, setFocusedDocId] = useState<string | null>(null);
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [input, setInput] = useState("");
@@ -25,21 +32,41 @@ export function Workspace() {
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [sending, setSending] = useState(false);
   const [uploadUi, setUploadUi] = useState<UploadUi>({ state: "idle" });
-  const [insightsLoadingId, setInsightsLoadingId] = useState<string | null>(
-    null
-  );
+  const [insightsLoadingId, setInsightsLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedDoc = useMemo(
-    () => documents.find((d) => d.id === selectedDocId) ?? null,
-    [documents, selectedDocId]
-  );
+  const selectedDoc = useMemo(() => {
+    if (!focusedDocId) return null;
+    return documents.find((d) => d.id === focusedDocId) ?? null;
+  }, [documents, focusedDocId]);
+
+  const conversationStorageKey = useMemo(() => {
+    if (!selectedProjectId) return null;
+    return `${LS_CONV_PREFIX}${selectedProjectId}`;
+  }, [selectedProjectId]);
+
+  const refreshProjects = useCallback(async () => {
+    const res = await fetch("/api/projects");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load projects");
+    setProjects(data.projects || []);
+    return (data.projects || []) as ProjectRow[];
+  }, []);
+
+  const refreshConversations = useCallback(async () => {
+    if (!selectedProjectId) return;
+    const res = await fetch(`/api/conversations?projectId=${selectedProjectId}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load conversations");
+    setConversations(data.conversations || []);
+  }, [selectedProjectId]);
 
   const refreshDocuments = useCallback(async () => {
+    if (!selectedProjectId) return;
     setLoadingDocs(true);
     setError(null);
     try {
-      const res = await fetch("/api/documents");
+      const res = await fetch(`/api/documents?projectId=${selectedProjectId}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load documents");
       setDocuments(data.documents || []);
@@ -48,40 +75,148 @@ export function Workspace() {
     } finally {
       setLoadingDocs(false);
     }
-  }, []);
+  }, [selectedProjectId]);
 
-  const loadConversation = useCallback(async (id: string) => {
+  const loadConversation = useCallback(
+    async (id: string) => {
+      if (!selectedProjectId) return;
+      setError(null);
+      try {
+        const res = await fetch(
+          `/api/conversations/${id}?projectId=${selectedProjectId}`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to load chat");
+        const msgs = (data.messages || []) as MessageRow[];
+        setMessages(msgs);
+        const lastAssistant = [...msgs]
+          .reverse()
+          .find((m) => m.role === "assistant");
+        setLastSources(lastAssistant?.sources_json || []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load chat");
+        if (conversationStorageKey) localStorage.removeItem(conversationStorageKey);
+        setConversationId(null);
+        setMessages([]);
+      }
+    },
+    [conversationStorageKey, selectedProjectId]
+  );
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const rows = await refreshProjects();
+        if (rows.length === 0) {
+          const createRes = await fetch("/api/projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: "Default Project" }),
+          });
+          const createData = await createRes.json();
+          if (!createRes.ok) {
+            throw new Error(createData.error || "Failed to create project");
+          }
+          const project = createData.project as ProjectRow;
+          setProjects([project]);
+          setSelectedProjectId(project.id);
+          localStorage.setItem(LS_PROJECT, project.id);
+          return;
+        }
+        const saved = localStorage.getItem(LS_PROJECT);
+        const resolved = rows.find((p) => p.id === saved)?.id || rows[0].id;
+        setSelectedProjectId(resolved);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load projects");
+      }
+    })();
+  }, [refreshProjects]);
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    localStorage.setItem(LS_PROJECT, selectedProjectId);
+    setConversationId(null);
+    setMessages([]);
+    setLastSources([]);
+    setFocusedDocId(null);
+    setSelectedDocIds([]);
+    void refreshDocuments();
+    void refreshConversations();
+    const key = `${LS_CONV_PREFIX}${selectedProjectId}`;
+    const savedConv = localStorage.getItem(key);
+    if (savedConv) {
+      setConversationId(savedConv);
+      void loadConversation(savedConv);
+    }
+  }, [selectedProjectId, refreshDocuments, refreshConversations, loadConversation]);
+
+  useEffect(() => {
+    setSelectedDocIds((prev) => prev.filter((id) => documents.some((d) => d.id === id)));
+    setFocusedDocId((prev) => (prev && documents.some((d) => d.id === prev) ? prev : null));
+  }, [documents]);
+
+  const createProject = async () => {
+    const name = prompt("Project name");
+    if (!name?.trim()) return;
     setError(null);
     try {
-      const res = await fetch(`/api/conversations/${id}`);
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load chat");
-      const msgs = (data.messages || []) as MessageRow[];
-      setMessages(msgs);
-      const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
-      setLastSources(lastAssistant?.sources_json || []);
+      if (!res.ok) throw new Error(data.error || "Failed to create project");
+      await refreshProjects();
+      if (data.project?.id) setSelectedProjectId(data.project.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load chat");
-      localStorage.removeItem(LS_CONV);
-      setConversationId(null);
-      setMessages([]);
+      setError(e instanceof Error ? e.message : "Failed to create project");
     }
-  }, []);
+  };
 
-  useEffect(() => {
-    void refreshDocuments();
-  }, [refreshDocuments]);
-
-  useEffect(() => {
-    const saved = localStorage.getItem(LS_CONV);
-    if (saved) {
-      setConversationId(saved);
-      void loadConversation(saved);
+  const renameProject = async () => {
+    if (!selectedProjectId) return;
+    const current = projects.find((p) => p.id === selectedProjectId);
+    const name = prompt("Rename project", current?.name || "");
+    if (!name?.trim()) return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${selectedProjectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          description: current?.description || null,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to rename project");
+      await refreshProjects();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to rename project");
     }
-  }, [loadConversation]);
+  };
+
+  const deleteProject = async () => {
+    if (!selectedProjectId) return;
+    if (!confirm("Delete this project with all documents and chats?")) return;
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${selectedProjectId}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to delete project");
+      const rows = await refreshProjects();
+      const next = rows[0]?.id || null;
+      setSelectedProjectId(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete project");
+    }
+  };
 
   const newChat = () => {
-    localStorage.removeItem(LS_CONV);
+    if (conversationStorageKey) localStorage.removeItem(conversationStorageKey);
     setConversationId(null);
     setMessages([]);
     setLastSources([]);
@@ -90,11 +225,12 @@ export function Workspace() {
 
   const onUpload = (fileList: FileList | null) => {
     const file = fileList?.[0];
-    if (!file) return;
+    if (!file || !selectedProjectId) return;
     setError(null);
     setUploadUi({ state: "uploading", percent: 0, determinate: false });
 
     const fd = new FormData();
+    fd.append("projectId", selectedProjectId);
     fd.append("file", file);
 
     const xhr = new XMLHttpRequest();
@@ -127,7 +263,12 @@ export function Workspace() {
           }
           if (xhr.status >= 200 && xhr.status < 300) {
             await refreshDocuments();
-            if (data.document?.id) setSelectedDocId(data.document.id);
+            if (data.document?.id) {
+              setFocusedDocId(data.document.id);
+              setSelectedDocIds((prev) =>
+                prev.includes(data.document!.id) ? prev : [...prev, data.document!.id]
+              );
+            }
           } else {
             throw new Error(data.error || "Upload failed");
           }
@@ -149,11 +290,12 @@ export function Workspace() {
 
   const sendMessage = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || !selectedProjectId) return;
     setSending(true);
     setError(null);
     const optimistic: MessageRow = {
       id: `temp-${Date.now()}`,
+      conversation_id: conversationId || "temp",
       role: "user",
       content: text,
       sources_json: null,
@@ -167,8 +309,9 @@ export function Workspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversationId,
+          projectId: selectedProjectId,
           message: text,
-          selectedDocumentId: selectedDocId,
+          selectedDocumentIds: selectedDocIds,
         }),
       });
       const data = await res.json();
@@ -176,18 +319,20 @@ export function Workspace() {
       const cid = data.conversationId as string;
       if (cid !== conversationId) {
         setConversationId(cid);
-        localStorage.setItem(LS_CONV, cid);
+        if (conversationStorageKey) localStorage.setItem(conversationStorageKey, cid);
       }
       const sources = (data.reply?.sources || []) as ChatSource[];
       setLastSources(sources);
       const assistant: MessageRow = {
         id: `a-${Date.now()}`,
+        conversation_id: cid,
         role: "assistant",
         content: data.reply?.content || "",
         sources_json: sources,
         created_at: new Date().toISOString(),
       };
       setMessages((m) => [...m, assistant]);
+      void refreshConversations();
     } catch (e) {
       setMessages((m) => m.filter((x) => x.id !== optimistic.id));
       setError(e instanceof Error ? e.message : "Chat failed");
@@ -197,13 +342,14 @@ export function Workspace() {
   };
 
   const regenerateInsights = async () => {
-    if (!selectedDocId) return;
-    setInsightsLoadingId(selectedDocId);
+    if (!focusedDocId || !selectedProjectId) return;
+    setInsightsLoadingId(focusedDocId);
     setError(null);
     try {
-      const res = await fetch(`/api/documents/${selectedDocId}/insights`, {
-        method: "POST",
-      });
+      const res = await fetch(
+        `/api/documents/${focusedDocId}/insights?projectId=${selectedProjectId}`,
+        { method: "POST" }
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Insights failed");
       await refreshDocuments();
@@ -215,17 +361,34 @@ export function Workspace() {
   };
 
   const deleteDocument = async (id: string) => {
+    if (!selectedProjectId) return;
     if (!confirm("Remove this document and its index?")) return;
     setError(null);
     try {
-      const res = await fetch(`/api/documents/${id}`, { method: "DELETE" });
+      const res = await fetch(
+        `/api/documents/${id}?projectId=${selectedProjectId}`,
+        { method: "DELETE" }
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Delete failed");
-      if (selectedDocId === id) setSelectedDocId(null);
+      if (focusedDocId === id) setFocusedDocId(null);
+      setSelectedDocIds((prev) => prev.filter((x) => x !== id));
       await refreshDocuments();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
     }
+  };
+
+  const toggleDocSelected = (id: string) => {
+    setSelectedDocIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const pickConversation = async (id: string) => {
+    setConversationId(id);
+    if (conversationStorageKey) localStorage.setItem(conversationStorageKey, id);
+    await loadConversation(id);
   };
 
   return (
@@ -245,9 +408,52 @@ export function Workspace() {
         </div>
       ) : null}
 
-      <div className="grid min-h-0 flex-1 grid-cols-[260px_1fr_340px]">
-        {/* Documents */}
+      <div className="grid min-h-0 flex-1 grid-cols-[300px_1fr_340px]">
         <aside className="flex min-h-0 flex-col border-r border-zinc-800 bg-[var(--surface)]">
+          <div className="space-y-2 border-b border-zinc-800 p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Project
+              </span>
+              <button
+                type="button"
+                className="text-[11px] text-teal-500 hover:underline"
+                onClick={() => void createProject()}
+              >
+                New
+              </button>
+            </div>
+            <select
+              value={selectedProjectId || ""}
+              onChange={(e) => setSelectedProjectId(e.target.value || null)}
+              className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100"
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                onClick={() => void renameProject()}
+                disabled={!selectedProjectId}
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                className="rounded border border-red-900/40 px-2 py-1 text-[11px] text-red-300 hover:bg-red-950/50"
+                onClick={() => void deleteProject()}
+                disabled={!selectedProjectId}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+
           <div className="border-b border-zinc-800 p-3">
             <label
               className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-zinc-600 bg-zinc-900/50 px-3 py-6 text-center text-xs text-zinc-400 transition hover:border-teal-600/50 hover:bg-zinc-900 ${
@@ -258,7 +464,7 @@ export function Workspace() {
                 type="file"
                 accept=".pdf,.xlsx,.xls,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 className="hidden"
-                disabled={uploadUi.state !== "idle"}
+                disabled={uploadUi.state !== "idle" || !selectedProjectId}
                 onChange={(e) => {
                   onUpload(e.target.files);
                   e.target.value = "";
@@ -279,27 +485,21 @@ export function Workspace() {
                   <div
                     className="mt-3 h-1.5 w-full max-w-[200px] overflow-hidden rounded-full bg-zinc-800"
                     role="progressbar"
-                    aria-valuenow={
-                      uploadUi.determinate ? uploadUi.percent : undefined
-                    }
+                    aria-valuenow={uploadUi.determinate ? uploadUi.percent : undefined}
                     aria-valuemin={0}
                     aria-valuemax={100}
                   >
                     <div
                       className="h-full rounded-full bg-teal-500 transition-[width] duration-150 ease-out"
                       style={{
-                        width: uploadUi.determinate
-                          ? `${uploadUi.percent}%`
-                          : "40%",
+                        width: uploadUi.determinate ? `${uploadUi.percent}%` : "40%",
                       }}
                     />
                   </div>
                 </>
               ) : (
                 <>
-                  <span className="font-medium text-zinc-200">
-                    Processing…
-                  </span>
+                  <span className="font-medium text-zinc-200">Processing…</span>
                   <span className="mt-1 text-[11px] text-zinc-500">
                     Extracting text, embedding, indexing
                   </span>
@@ -310,7 +510,46 @@ export function Workspace() {
               )}
             </label>
           </div>
+
+          {selectedDocIds.length > 0 ? (
+            <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+              <span className="text-[11px] text-zinc-500">
+                Chat filter: {selectedDocIds.length} docs
+              </span>
+              <button
+                type="button"
+                className="text-[11px] text-teal-500 hover:underline"
+                onClick={() => setSelectedDocIds([])}
+              >
+                Clear
+              </button>
+            </div>
+          ) : null}
+
           <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-2">
+            <div className="mb-2">
+              <p className="px-2 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                Conversations
+              </p>
+              <ul className="mt-1 space-y-1">
+                {conversations.map((c) => (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      onClick={() => void pickConversation(c.id)}
+                      className={`w-full rounded-md px-2 py-1.5 text-left text-[11px] transition ${
+                        conversationId === c.id
+                          ? "bg-zinc-800 text-zinc-100"
+                          : "text-zinc-400 hover:bg-zinc-800/80"
+                      }`}
+                    >
+                      <p className="truncate">{c.title || "Untitled chat"}</p>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
             {loadingDocs ? (
               <p className="px-2 py-3 text-xs text-zinc-500">Loading…</p>
             ) : documents.length === 0 ? (
@@ -323,15 +562,27 @@ export function Workspace() {
                   <li key={d.id}>
                     <button
                       type="button"
-                      onClick={() => setSelectedDocId(d.id)}
+                      onClick={() => setFocusedDocId(d.id)}
                       className={`flex w-full flex-col rounded-md border px-2 py-2 text-left text-xs transition ${
-                        selectedDocId === d.id
+                        focusedDocId === d.id
                           ? "border-teal-600/40 bg-[var(--accent-muted)]"
                           : "border-transparent hover:bg-zinc-800/80"
                       }`}
                     >
-                      <span className="truncate font-medium text-zinc-200">
-                        {d.file_name}
+                      <span className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 accent-teal-500"
+                          checked={selectedDocIds.includes(d.id)}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            toggleDocSelected(d.id);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        <span className="truncate font-medium text-zinc-200">
+                          {d.file_name}
+                        </span>
                       </span>
                       <span className="mt-0.5 font-mono text-[10px] uppercase text-zinc-500">
                         {d.status}
@@ -347,7 +598,6 @@ export function Workspace() {
           </div>
         </aside>
 
-        {/* Chat */}
         <main className="flex min-h-0 flex-col bg-[var(--background)]">
           <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
             <span className="text-xs font-medium text-zinc-500">Research chat</span>
@@ -364,11 +614,10 @@ export function Workspace() {
               <div className="mx-auto max-w-xl rounded-xl border border-zinc-800 bg-zinc-900/30 p-6 text-sm text-zinc-400">
                 <p className="font-medium text-zinc-200">Ask about your documents</p>
                 <p className="mt-2 leading-relaxed">
-                  Upload PDFs or Excel files, wait until status is{" "}
+                  Pick a project, upload PDFs or Excel files, wait until status is{" "}
                   <span className="font-mono text-teal-400">ready</span>, then ask
-                  questions. Answers include sources (file name + excerpt). Use the
-                  sidebar to focus on one document, or leave none selected to
-                  search across all ready documents.
+                  questions. By default chat searches all docs in the project; check
+                  documents on the left to narrow retrieval.
                 </p>
               </div>
             ) : null}
@@ -414,12 +663,12 @@ export function Workspace() {
                   }
                 }}
                 rows={2}
-                placeholder="Ask a question about your documents…"
+                placeholder="Ask a question about the current project…"
                 className="min-h-[48px] flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-teal-600/50 focus:outline-none"
               />
               <button
                 type="button"
-                disabled={sending || !input.trim()}
+                disabled={sending || !input.trim() || !selectedProjectId}
                 onClick={() => void sendMessage()}
                 className="self-end rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-teal-500 disabled:opacity-40"
               >
@@ -429,7 +678,6 @@ export function Workspace() {
           </div>
         </main>
 
-        {/* Sources & insights */}
         <aside className="flex min-h-0 flex-col border-l border-zinc-800 bg-[var(--surface)]">
           <div className="border-b border-zinc-800 px-3 py-2">
             <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -451,9 +699,7 @@ export function Workspace() {
                     key={`${s.chunkId}-${i}`}
                     className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2"
                   >
-                    <p className="font-mono text-[11px] text-teal-500">
-                      {s.fileName}
-                    </p>
+                    <p className="font-mono text-[11px] text-teal-500">{s.fileName}</p>
                     <p className="mt-1 text-xs leading-relaxed text-zinc-400">
                       {s.snippet}
                     </p>
@@ -468,22 +714,21 @@ export function Workspace() {
               <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
                 Insights
               </h2>
-              {selectedDocId ? (
+              {focusedDocId ? (
                 <button
                   type="button"
-                  disabled={insightsLoadingId === selectedDocId}
+                  disabled={insightsLoadingId === focusedDocId}
                   onClick={() => void regenerateInsights()}
                   className="text-[11px] text-teal-500 hover:underline disabled:opacity-40"
                 >
-                  {insightsLoadingId === selectedDocId ? "Running…" : "Regenerate"}
+                  {insightsLoadingId === focusedDocId ? "Running…" : "Regenerate"}
                 </button>
               ) : null}
             </div>
             <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-3">
               {!selectedDoc ? (
                 <p className="text-xs text-zinc-500">
-                  Select a document to view red flags, metrics, and business
-                  quality notes.
+                  Select one document to view red flags, metrics, and business quality notes.
                 </p>
               ) : selectedDoc.status !== "ready" ? (
                 <p className="text-xs text-zinc-500">
@@ -491,8 +736,7 @@ export function Workspace() {
                 </p>
               ) : !selectedDoc.insights_json ? (
                 <p className="text-xs text-zinc-500">
-                  No insights yet. They generate after indexing; use Regenerate if
-                  needed.
+                  No insights yet. They generate after indexing; use Regenerate if needed.
                 </p>
               ) : (
                 <div className="space-y-4 text-xs">
@@ -507,25 +751,19 @@ export function Workspace() {
                   <section>
                     <h3 className="font-semibold text-zinc-200">Key metrics</h3>
                     <ul className="mt-2 space-y-2">
-                      {(selectedDoc.insights_json.keyMetrics || []).map(
-                        (k, i) => (
-                          <li
-                            key={i}
-                            className="flex justify-between gap-2 border-b border-zinc-800/80 pb-2 font-mono text-[11px]"
-                          >
-                            <span className="text-zinc-500">{k.label}</span>
-                            <span className="text-right text-teal-400">
-                              {k.value}
-                            </span>
-                          </li>
-                        )
-                      )}
+                      {(selectedDoc.insights_json.keyMetrics || []).map((k, i) => (
+                        <li
+                          key={i}
+                          className="flex justify-between gap-2 border-b border-zinc-800/80 pb-2 font-mono text-[11px]"
+                        >
+                          <span className="text-zinc-500">{k.label}</span>
+                          <span className="text-right text-teal-400">{k.value}</span>
+                        </li>
+                      ))}
                     </ul>
                   </section>
                   <section>
-                    <h3 className="font-semibold text-zinc-200">
-                      Business quality
-                    </h3>
+                    <h3 className="font-semibold text-zinc-200">Business quality</h3>
                     <p className="mt-1 leading-relaxed text-zinc-400">
                       {selectedDoc.insights_json.businessQualitySummary}
                     </p>

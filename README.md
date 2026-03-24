@@ -87,7 +87,9 @@ Browse models and dimensions on [OpenRouter](https://openrouter.ai/models).
 | `GET` / `POST` | `/api/documents` | List / upload (multipart field `file`) |
 | `DELETE` | `/api/documents/[id]` | Remove document, chunks, and files |
 | `POST` | `/api/documents/[id]/insights` | Regenerate insights JSON |
-| `POST` | `/api/chat` | RAG chat; body: `message`, optional `conversationId`, `selectedDocumentId` |
+| `POST` | `/api/chat` | RAG chat; body: `projectId`, `message`, optional `conversationId`, `selectedDocumentIds[]` |
+| `GET` / `POST` | `/api/projects` | List / create projects |
+| `PATCH` / `DELETE` | `/api/projects/[id]` | Rename or delete a project (cascade docs/chats) |
 | `GET` / `POST` | `/api/conversations` | List / create conversations |
 | `GET` | `/api/conversations/[id]` | Messages for a conversation |
 

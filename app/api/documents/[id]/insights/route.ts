@@ -9,14 +9,21 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function POST(_req: Request, ctx: Ctx) {
   try {
     const { id } = await ctx.params;
+    const reqUrl = new URL(_req.url);
+    const projectId = reqUrl.searchParams.get("projectId")?.trim();
+    if (!projectId) {
+      return NextResponse.json({ error: "projectId is required" }, { status: 400 });
+    }
     const pool = getPool();
     const { rows } = await pool.query<{
       file_name: string;
       char_count: number | null;
       status: string;
     }>(
-      `SELECT file_name, char_count, status FROM documents WHERE id = $1::uuid`,
-      [id]
+      `SELECT file_name, char_count, status
+       FROM documents
+       WHERE id = $1::uuid AND project_id = $2::uuid`,
+      [id, projectId]
     );
     const doc = rows[0];
     if (!doc) {

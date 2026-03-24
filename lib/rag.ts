@@ -21,7 +21,8 @@ function stripJsonFence(s: string): string {
 
 export async function retrieveChunks(args: {
   query: string;
-  documentId?: string | null;
+  projectId: string;
+  documentIds?: string[] | null;
   limit?: number;
 }): Promise<RetrievedChunk[]> {
   const limit = args.limit ?? 10;
@@ -29,11 +30,13 @@ export async function retrieveChunks(args: {
   const vec = toVectorParam(qEmb);
   const pool = getPool();
 
-  const docFilter = args.documentId
-    ? `AND c.document_id = $2::uuid`
-    : "";
-  const params: string[] = [vec];
-  if (args.documentId) params.push(args.documentId);
+  const params: unknown[] = [vec, args.projectId];
+  let docFilter = "";
+
+  if (args.documentIds && args.documentIds.length > 0) {
+    params.push(args.documentIds);
+    docFilter = `AND c.document_id = ANY($3::uuid[])`;
+  }
 
   const { rows } = await pool.query<{
     chunk_id: string;
@@ -44,7 +47,9 @@ export async function retrieveChunks(args: {
     `SELECT c.id AS chunk_id, c.document_id, d.file_name, c.content
      FROM chunks c
      JOIN documents d ON d.id = c.document_id
-     WHERE d.status = 'ready' ${docFilter}
+     WHERE d.status = 'ready'
+       AND d.project_id = $2::uuid
+       ${docFilter}
      ORDER BY c.embedding <=> $1::vector
      LIMIT ${limit}`,
     params

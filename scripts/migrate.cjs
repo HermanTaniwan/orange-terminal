@@ -1,8 +1,7 @@
-const { readFileSync, existsSync } = require("node:fs");
+const { readFileSync, existsSync, readdirSync } = require("node:fs");
 const { join } = require("node:path");
 const pg = require("pg");
 
-/** Node does not load `.env` by itself (Next.js does). Read project `.env` here. */
 function loadDotEnv() {
   const p = join(__dirname, "..", ".env");
   if (!existsSync(p)) return;
@@ -33,16 +32,26 @@ if (!url) {
   process.exit(1);
 }
 
+function getMigrationFiles() {
+  const dir = join(__dirname, "../db/migrations");
+  return readdirSync(dir)
+    .filter((name) => /^\d+_.*\.sql$/.test(name))
+    .sort((a, b) => a.localeCompare(b));
+}
+
 async function main() {
   const client = new pg.Client({ connectionString: url });
   await client.connect();
-  const sql = readFileSync(
-    join(__dirname, "../db/migrations/001_init.sql"),
-    "utf8"
-  );
-  await client.query(sql);
+
+  const files = getMigrationFiles();
+  for (const file of files) {
+    const sql = readFileSync(join(__dirname, "../db/migrations", file), "utf8");
+    await client.query(sql);
+    console.log(`Applied ${file}`);
+  }
+
   await client.end();
-  console.log("Migration applied.");
+  console.log("All migrations applied.");
 }
 
 main().catch((e) => {

@@ -7,10 +7,15 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as {
+      projectId?: string | null;
       conversationId?: string | null;
       message?: string;
-      selectedDocumentId?: string | null;
+      selectedDocumentIds?: string[] | null;
     };
+    const projectId = body.projectId?.trim();
+    if (!projectId) {
+      return NextResponse.json({ error: "projectId is required" }, { status: 400 });
+    }
     const text = body.message?.trim();
     if (!text) {
       return NextResponse.json({ error: "message is required" }, { status: 400 });
@@ -22,14 +27,18 @@ export async function POST(req: Request) {
     if (!conversationId) {
       const title = text.slice(0, 80);
       const { rows } = await pool.query(
-        `INSERT INTO conversations (title) VALUES ($1) RETURNING id`,
-        [title]
+        `INSERT INTO conversations (project_id, title)
+         VALUES ($1::uuid, $2)
+         RETURNING id`,
+        [projectId, title]
       );
       conversationId = rows[0].id as string;
     } else {
       const { rows } = await pool.query(
-        `SELECT id FROM conversations WHERE id = $1::uuid`,
-        [conversationId]
+        `SELECT id
+         FROM conversations
+         WHERE id = $1::uuid AND project_id = $2::uuid`,
+        [conversationId, projectId]
       );
       if (!rows[0]) {
         return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
@@ -43,7 +52,9 @@ export async function POST(req: Request) {
 
     const chunks = await retrieveChunks({
       query: text,
-      documentId: body.selectedDocumentId || null,
+      projectId,
+      documentIds:
+        body.selectedDocumentIds?.filter((id) => typeof id === "string") || [],
       limit: 10,
     });
 
