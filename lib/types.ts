@@ -36,6 +36,10 @@ export type ProjectRow = {
   id: string;
   name: string;
   description: string | null;
+  project_type: "emiten" | "non_emiten";
+  ticker_symbol: string | null;
+  exchange: string | null;
+  industry_topic: string | null;
   created_at: string;
 };
 
@@ -45,4 +49,21 @@ export type ConversationRow = {
   title: string | null;
   created_at: string;
   last_preview?: string | null;
+};
+
+export type IdxLargestAttachment = {
+  title: string;
+  publishedAt: string;
+  fileName: string;
+  url: string;
+  sizeBytes: number;
+};
+
+export type IdxLargestAttachmentResponse = {
+  selected: IdxLargestAttachment | null;
+  candidatesCount: number;
+  sizedCount: number;
+  failedCount: number;
+  topCandidates: IdxLargestAttachment[];
+  error?: string;
 };

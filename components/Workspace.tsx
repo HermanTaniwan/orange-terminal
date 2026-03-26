@@ -6,17 +6,31 @@ import type {
   ChatSource,
   ConversationRow,
   DocumentRow,
+  IdxLargestAttachmentResponse,
   MessageRow,
   ProjectRow,
 } from "@/lib/types";
 
 const LS_PROJECT = "orange_terminal_project_id";
 const LS_CONV_PREFIX = "orange_terminal_conversation_";
+/** Matches migration default project; server rejects DELETE for this id. */
+const DEFAULT_PROJECT_ID = "00000000-0000-0000-0000-000000000001";
 
 type UploadUi =
   | { state: "idle" }
   | { state: "uploading"; percent: number; determinate: boolean }
   | { state: "processing" };
+
+type ProjectType = "emiten" | "non_emiten";
+type ProjectFormMode = "create" | "edit" | null;
+type ProjectDraft = {
+  name: string;
+  description: string;
+  projectType: ProjectType;
+  tickerSymbol: string;
+  exchange: string;
+  industryTopic: string;
+};
 
 export function Workspace() {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -34,11 +48,50 @@ export function Workspace() {
   const [uploadUi, setUploadUi] = useState<UploadUi>({ state: "idle" });
   const [insightsLoadingId, setInsightsLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [projectFormMode, setProjectFormMode] = useState<ProjectFormMode>(null);
+  const [idxCode, setIdxCode] = useState("");
+  const [idxLoading, setIdxLoading] = useState(false);
+  const [idxResult, setIdxResult] = useState<IdxLargestAttachmentResponse | null>(null);
+  const [projectDraft, setProjectDraft] = useState<ProjectDraft>({
+    name: "",
+    description: "",
+    projectType: "non_emiten",
+    tickerSymbol: "",
+    exchange: "IDX",
+    industryTopic: "",
+  });
+
+  const formatUploadedAt = (iso: string) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const datePart = d.toLocaleDateString("id-ID", {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    });
+    const timePart = d.toLocaleTimeString("id-ID", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    return `${datePart} ${timePart}`;
+  };
 
   const selectedDoc = useMemo(() => {
     if (!focusedDocId) return null;
     return documents.find((d) => d.id === focusedDocId) ?? null;
   }, [documents, focusedDocId]);
+
+  const selectedProject = useMemo(() => {
+    if (!selectedProjectId) return null;
+    return projects.find((p) => p.id === selectedProjectId) ?? null;
+  }, [projects, selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProject?.project_type === "emiten" && selectedProject.ticker_symbol) {
+      setIdxCode(selectedProject.ticker_symbol);
+    }
+  }, [selectedProject?.id, selectedProject?.project_type, selectedProject?.ticker_symbol]);
 
   const conversationStorageKey = useMemo(() => {
     if (!selectedProjectId) return null;
@@ -111,7 +164,11 @@ export function Workspace() {
           const createRes = await fetch("/api/projects", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: "Default Project" }),
+            body: JSON.stringify({
+              name: "Default Project",
+              projectType: "non_emiten",
+              industryTopic: "General",
+            }),
           });
           const createData = await createRes.json();
           if (!createRes.ok) {
@@ -155,51 +212,103 @@ export function Workspace() {
     setFocusedDocId((prev) => (prev && documents.some((d) => d.id === prev) ? prev : null));
   }, [documents]);
 
-  const createProject = async () => {
-    const name = prompt("Project name");
-    if (!name?.trim()) return;
-    setError(null);
-    try {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to create project");
-      await refreshProjects();
-      if (data.project?.id) setSelectedProjectId(data.project.id);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create project");
-    }
+  const openCreateProjectForm = () => {
+    setProjectDraft({
+      name: "",
+      description: "",
+      projectType: "non_emiten",
+      tickerSymbol: "",
+      exchange: "IDX",
+      industryTopic: "",
+    });
+    setProjectFormMode("create");
   };
 
-  const renameProject = async () => {
-    if (!selectedProjectId) return;
-    const current = projects.find((p) => p.id === selectedProjectId);
-    const name = prompt("Rename project", current?.name || "");
-    if (!name?.trim()) return;
+  const openEditProjectForm = () => {
+    if (!selectedProject) return;
+    setProjectDraft({
+      name: selectedProject.name || "",
+      description: selectedProject.description || "",
+      projectType: selectedProject.project_type || "non_emiten",
+      tickerSymbol: selectedProject.ticker_symbol || "",
+      exchange: selectedProject.exchange || "IDX",
+      industryTopic: selectedProject.industry_topic || "",
+    });
+    setProjectFormMode("edit");
+  };
+
+  const submitProjectForm = async () => {
+    const payload = {
+      name: projectDraft.name.trim(),
+      description: projectDraft.description.trim() || null,
+      projectType: projectDraft.projectType,
+      tickerSymbol:
+        projectDraft.projectType === "emiten"
+          ? projectDraft.tickerSymbol.trim().toUpperCase()
+          : null,
+      exchange:
+        projectDraft.projectType === "emiten"
+          ? projectDraft.exchange.trim().toUpperCase() || "IDX"
+          : null,
+      industryTopic:
+        projectDraft.projectType === "non_emiten"
+          ? projectDraft.industryTopic.trim()
+          : null,
+    };
+
+    if (!payload.name) {
+      setError("Nama project wajib diisi.");
+      return;
+    }
+    if (payload.projectType === "emiten" && !payload.tickerSymbol) {
+      setError("Kode emiten wajib diisi untuk project Emiten.");
+      return;
+    }
+    if (payload.projectType === "non_emiten" && !payload.industryTopic) {
+      setError("Topik industri wajib diisi untuk project Non-Emiten.");
+      return;
+    }
+
     setError(null);
     try {
-      const res = await fetch(`/api/projects/${selectedProjectId}`, {
-        method: "PATCH",
+      const isCreate = projectFormMode === "create";
+      const url = isCreate
+        ? "/api/projects"
+        : `/api/projects/${selectedProjectId}`;
+      const method = isCreate ? "POST" : "PATCH";
+      const res = await fetch(url, {
+        method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          description: current?.description || null,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to rename project");
-      await refreshProjects();
+      if (!res.ok) throw new Error(data.error || "Failed to save project");
+      const rows = await refreshProjects();
+      const nextId =
+        (data.project?.id as string | undefined) ||
+        (isCreate
+          ? rows.find((p) => p.name === payload.name)?.id
+          : selectedProjectId) ||
+        null;
+      if (nextId) setSelectedProjectId(nextId);
+      setProjectFormMode(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to rename project");
+      setError(e instanceof Error ? e.message : "Failed to save project");
     }
   };
 
   const deleteProject = async () => {
     if (!selectedProjectId) return;
-    if (!confirm("Delete this project with all documents and chats?")) return;
+    if (selectedProjectId === DEFAULT_PROJECT_ID) {
+      setError("Project bawaan tidak bisa dihapus. Buat project baru untuk memisahkan data.");
+      return;
+    }
+    if (
+      !confirm(
+        "Hapus project ini beserta semua dokumen dan percakapan? Tindakan ini tidak bisa dibatalkan."
+      )
+    )
+      return;
     setError(null);
     try {
       const res = await fetch(`/api/projects/${selectedProjectId}`, {
@@ -288,6 +397,37 @@ export function Workspace() {
     xhr.send(fd);
   };
 
+  const fetchLargestFromIdx = async () => {
+    const kodeEmiten = idxCode.trim().toUpperCase();
+    if (!kodeEmiten) {
+      setError("Kode emiten wajib diisi untuk tarik data IDX.");
+      return;
+    }
+    setIdxLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams({
+        kodeEmiten,
+      });
+      const res = await fetch(`/api/idx/largest-attachment?${params.toString()}`);
+      const data = (await res.json()) as IdxLargestAttachmentResponse;
+      if (!res.ok) throw new Error(data.error || "Failed to fetch IDX data");
+      setIdxResult(data);
+    } catch (e) {
+      setIdxResult(null);
+      const msg = e instanceof Error ? e.message : "Failed to fetch IDX data";
+      if (/403|blocked/i.test(msg)) {
+        setError(
+          "IDX menolak akses dari server ini (403). Coba ganti network/VPS atau jalankan dari server dengan IP yang tidak diblokir."
+        );
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setIdxLoading(false);
+    }
+  };
+
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || sending || !selectedProjectId) return;
@@ -362,7 +502,12 @@ export function Workspace() {
 
   const deleteDocument = async (id: string) => {
     if (!selectedProjectId) return;
-    if (!confirm("Remove this document and its index?")) return;
+    if (
+      !confirm(
+        "Hapus dokumen ini beserta index-nya? Tindakan ini tidak bisa dibatalkan."
+      )
+    )
+      return;
     setError(null);
     try {
       const res = await fetch(
@@ -376,6 +521,38 @@ export function Workspace() {
       await refreshDocuments();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
+    }
+  };
+
+  const openDocumentInNewTab = (id: string) => {
+    if (!selectedProjectId) return;
+    // Opens the raw uploaded file in a separate tab (PDF will render, Excel will download).
+    window.open(
+      `/api/documents/${id}/file?projectId=${selectedProjectId}`,
+      "_blank",
+      "noopener,noreferrer"
+    );
+  };
+
+  const renameDocument = async (id: string, currentName: string) => {
+    if (!selectedProjectId) return;
+    const next = prompt("Ubah nama dokumen", currentName);
+    const fileName = next?.trim();
+    if (!fileName) return;
+    if (fileName === currentName) return;
+
+    setError(null);
+    try {
+      const res = await fetch(`/api/documents/${id}?projectId=${selectedProjectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Rename failed");
+      await refreshDocuments();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Rename failed");
     }
   };
 
@@ -418,7 +595,7 @@ export function Workspace() {
               <button
                 type="button"
                 className="text-[11px] text-teal-500 hover:underline"
-                onClick={() => void createProject()}
+                onClick={openCreateProjectForm}
               >
                 New
               </button>
@@ -438,19 +615,169 @@ export function Workspace() {
               <button
                 type="button"
                 className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-                onClick={() => void renameProject()}
+                onClick={openEditProjectForm}
                 disabled={!selectedProjectId}
               >
-                Rename
+                Edit
               </button>
               <button
                 type="button"
-                className="rounded border border-red-900/40 px-2 py-1 text-[11px] text-red-300 hover:bg-red-950/50"
+                className="rounded border border-red-900/40 px-2 py-1 text-[11px] text-red-300 hover:bg-red-950/50 disabled:cursor-not-allowed disabled:opacity-40"
                 onClick={() => void deleteProject()}
-                disabled={!selectedProjectId}
+                disabled={
+                  !selectedProjectId || selectedProjectId === DEFAULT_PROJECT_ID
+                }
+                title={
+                  selectedProjectId === DEFAULT_PROJECT_ID
+                    ? "Project bawaan tidak bisa dihapus"
+                    : "Hapus project yang dipilih beserta dokumen dan chat"
+                }
               >
-                Delete
+                Hapus
               </button>
+            </div>
+            {selectedProjectId === DEFAULT_PROJECT_ID ? (
+              <p className="text-[10px] leading-snug text-zinc-500">
+                Project bawaan tidak dapat dihapus. Pakai <span className="text-teal-500">New</span>{" "}
+                untuk membuat project lain, lalu pilih project itu dan ketuk{" "}
+                <span className="text-red-300/90">Hapus</span>.
+              </p>
+            ) : null}
+            {projectFormMode ? (
+              <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+                <p className="text-[11px] font-medium text-zinc-200">
+                  {projectFormMode === "create" ? "Project baru" : "Ubah project"}
+                </p>
+                <input
+                  value={projectDraft.name}
+                  onChange={(e) =>
+                    setProjectDraft((p) => ({ ...p, name: e.target.value }))
+                  }
+                  placeholder="Nama project"
+                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                />
+                <textarea
+                  value={projectDraft.description}
+                  onChange={(e) =>
+                    setProjectDraft((p) => ({
+                      ...p,
+                      description: e.target.value,
+                    }))
+                  }
+                  placeholder="Deskripsi (opsional)"
+                  rows={2}
+                  className="w-full resize-none rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                />
+                <select
+                  value={projectDraft.projectType}
+                  onChange={(e) =>
+                    setProjectDraft((p) => ({
+                      ...p,
+                      projectType: e.target.value as ProjectType,
+                    }))
+                  }
+                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                >
+                  <option value="non_emiten">Non-Emiten</option>
+                  <option value="emiten">Emiten</option>
+                </select>
+                {projectDraft.projectType === "emiten" ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      value={projectDraft.tickerSymbol}
+                      onChange={(e) =>
+                        setProjectDraft((p) => ({
+                          ...p,
+                          tickerSymbol: e.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="Kode emiten (wajib)"
+                      className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                    />
+                    <input
+                      value={projectDraft.exchange}
+                      onChange={(e) =>
+                        setProjectDraft((p) => ({
+                          ...p,
+                          exchange: e.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="Bursa (IDX)"
+                      className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                    />
+                  </div>
+                ) : (
+                  <input
+                    value={projectDraft.industryTopic}
+                    onChange={(e) =>
+                      setProjectDraft((p) => ({
+                        ...p,
+                        industryTopic: e.target.value,
+                      }))
+                    }
+                    placeholder="Topik/Industri (wajib)"
+                    className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                  />
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void submitProjectForm()}
+                    className="rounded border border-teal-800/50 px-2 py-1 text-[11px] text-teal-300 hover:bg-teal-950/40"
+                  >
+                    Simpan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProjectFormMode(null)}
+                    className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                  >
+                    Batal
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+              <p className="text-[11px] font-medium text-zinc-200">Tarik data IDX</p>
+              <div className="flex gap-2">
+                <input
+                  value={idxCode}
+                  onChange={(e) => setIdxCode(e.target.value.toUpperCase())}
+                  placeholder="Kode Emiten (contoh: CASS)"
+                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
+                />
+                <button
+                  type="button"
+                  onClick={() => void fetchLargestFromIdx()}
+                  disabled={idxLoading}
+                  className="rounded border border-teal-800/50 px-2 py-1 text-[11px] text-teal-300 hover:bg-teal-950/40 disabled:opacity-40"
+                >
+                  {idxLoading ? "Loading..." : "Tarik"}
+                </button>
+              </div>
+              {idxResult?.selected ? (
+                <div className="space-y-1 rounded border border-zinc-800 bg-zinc-950/40 p-2 text-[10px]">
+                  <p className="font-medium text-zinc-200">{idxResult.selected.fileName}</p>
+                  <p className="text-zinc-500">{idxResult.selected.title}</p>
+                  <p className="text-zinc-500">
+                    {idxResult.selected.sizeBytes >= 0
+                      ? `${(idxResult.selected.sizeBytes / 1024 / 1024).toFixed(2)} MB`
+                      : "Ukuran file tidak terdeteksi (fallback heuristik)."}
+                  </p>
+                  <a
+                    href={idxResult.selected.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-teal-400 hover:underline"
+                  >
+                    Buka PDF
+                  </a>
+                </div>
+              ) : idxResult ? (
+                <p className="text-[10px] text-zinc-500">
+                  Tidak ada attachment PDF yang cocok untuk filter saat ini.
+                </p>
+              ) : null}
             </div>
           </div>
 
@@ -560,16 +887,25 @@ export function Workspace() {
               <ul className="space-y-1">
                 {documents.map((d) => (
                   <li key={d.id}>
-                    <button
-                      type="button"
-                      onClick={() => setFocusedDocId(d.id)}
-                      className={`flex w-full flex-col rounded-md border px-2 py-2 text-left text-xs transition ${
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setFocusedDocId(d.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setFocusedDocId(d.id);
+                        }
+                      }}
+                      className={`group flex w-full flex-col rounded-md border px-2 py-1.5 text-left text-xs transition ${
                         focusedDocId === d.id
                           ? "border-teal-600/40 bg-[var(--accent-muted)]"
                           : "border-transparent hover:bg-zinc-800/80"
                       }`}
                     >
-                      <span className="flex items-center gap-2">
+                      <div className="flex items-center gap-2">
                         <input
                           type="checkbox"
                           className="h-3.5 w-3.5 accent-teal-500"
@@ -580,17 +916,56 @@ export function Workspace() {
                           }}
                           onClick={(e) => e.stopPropagation()}
                         />
-                        <span className="truncate font-medium text-zinc-200">
+                        <span className="truncate text-[11px] font-medium text-zinc-200">
                           {d.file_name}
                         </span>
-                      </span>
-                      <span className="mt-0.5 font-mono text-[10px] uppercase text-zinc-500">
-                        {d.status}
-                        {d.status === "failed" && d.error_message
-                          ? ` — ${d.error_message.slice(0, 40)}…`
-                          : ""}
-                      </span>
-                    </button>
+                      </div>
+
+                      <div className="mt-0.5 text-[9px] text-zinc-600">
+                        {formatUploadedAt(d.created_at)}
+                      </div>
+
+                      <div
+                        className="mt-1 flex items-center gap-1"
+                      >
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void renameDocument(d.id, d.file_name);
+                          }}
+                          className="rounded border border-zinc-800 px-1 py-0.5 text-[9px] text-zinc-500 hover:bg-zinc-900/60 disabled:cursor-not-allowed disabled:opacity-40"
+                          disabled={!selectedProjectId}
+                          title="Rename dokumen"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDocumentInNewTab(d.id);
+                          }}
+                          className="rounded border border-teal-900/45 px-1 py-0.5 text-[9px] text-teal-300/80 hover:bg-teal-950/40 disabled:cursor-not-allowed disabled:opacity-40"
+                          disabled={!selectedProjectId}
+                          title="Buka file dokumen di tab baru"
+                        >
+                          Buka
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void deleteDocument(d.id);
+                          }}
+                          className="rounded border border-red-900/40 px-1 py-0.5 text-[9px] text-red-300 hover:bg-red-950/50 disabled:cursor-not-allowed disabled:opacity-40"
+                          disabled={!selectedProjectId}
+                          title="Hapus dokumen"
+                        >
+                          Hapus
+                        </button>
+                      </div>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -600,7 +975,16 @@ export function Workspace() {
 
         <main className="flex min-h-0 flex-col bg-[var(--background)]">
           <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
-            <span className="text-xs font-medium text-zinc-500">Research chat</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-zinc-500">Research chat</span>
+              {selectedProject ? (
+                <span className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                  {selectedProject.project_type === "emiten"
+                    ? "Mode Emiten"
+                    : "Mode Non-Emiten"}
+                </span>
+              ) : null}
+            </div>
             <button
               type="button"
               onClick={newChat}
@@ -614,10 +998,9 @@ export function Workspace() {
               <div className="mx-auto max-w-xl rounded-xl border border-zinc-800 bg-zinc-900/30 p-6 text-sm text-zinc-400">
                 <p className="font-medium text-zinc-200">Ask about your documents</p>
                 <p className="mt-2 leading-relaxed">
-                  Pick a project, upload PDFs or Excel files, wait until status is{" "}
-                  <span className="font-mono text-teal-400">ready</span>, then ask
-                  questions. By default chat searches all docs in the project; check
-                  documents on the left to narrow retrieval.
+                  {selectedProject?.project_type === "emiten"
+                    ? "Project Emiten: tanya soal kinerja, valuasi, aksi korporasi, atau isu spesifik emiten. Upload dokumen pendukung untuk memperkaya konteks."
+                    : "Project Non-Emiten: tanya soal tren industri, kompetitor, atau dinamika sektor. Upload dokumen riset/industri untuk memperkaya konteks."}
                 </p>
               </div>
             ) : null}
@@ -663,7 +1046,11 @@ export function Workspace() {
                   }
                 }}
                 rows={2}
-                placeholder="Ask a question about the current project…"
+                placeholder={
+                  selectedProject?.project_type === "emiten"
+                    ? "Tanya soal emiten ini (kinerja, valuasi, aksi korporasi, dll)…"
+                    : "Tanya soal project ini (industri, tren, kompetitor, dll)…"
+                }
                 className="min-h-[48px] flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-teal-600/50 focus:outline-none"
               />
               <button
@@ -740,40 +1127,70 @@ export function Workspace() {
                 </p>
               ) : (
                 <div className="space-y-4 text-xs">
-                  <section>
-                    <h3 className="font-semibold text-red-400">Red flags</h3>
-                    <ul className="mt-1 list-disc space-y-1 pl-4 text-zinc-400">
-                      {(selectedDoc.insights_json.redFlags || []).map((r, i) => (
-                        <li key={i}>{r}</li>
-                      ))}
-                    </ul>
-                  </section>
-                  <section>
-                    <h3 className="font-semibold text-zinc-200">Key metrics</h3>
-                    <ul className="mt-2 space-y-2">
-                      {(selectedDoc.insights_json.keyMetrics || []).map((k, i) => (
-                        <li
-                          key={i}
-                          className="flex justify-between gap-2 border-b border-zinc-800/80 pb-2 font-mono text-[11px]"
-                        >
-                          <span className="text-zinc-500">{k.label}</span>
-                          <span className="text-right text-teal-400">{k.value}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                  <section>
-                    <h3 className="font-semibold text-zinc-200">Business quality</h3>
-                    <p className="mt-1 leading-relaxed text-zinc-400">
-                      {selectedDoc.insights_json.businessQualitySummary}
-                    </p>
-                  </section>
+                  {(() => {
+                    const ins = selectedDoc.insights_json;
+                    const redFlags = ins.redFlags || [];
+                    const keyMetrics = ins.keyMetrics || [];
+                    return (
+                      <>
+                        <section>
+                          <h3 className="font-semibold text-red-400">
+                            Red flags
+                          </h3>
+                          {redFlags.length === 0 ? (
+                            <p className="mt-1 text-xs text-zinc-500">
+                              Tidak ada red flags yang jelas terdeteksi dari cuplikan dokumen ini.
+                            </p>
+                          ) : (
+                            <ul className="mt-1 list-disc space-y-1 pl-4 text-zinc-400">
+                              {redFlags.map((r, i) => (
+                                <li key={i}>{r}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </section>
+                        <section>
+                          <h3 className="font-semibold text-zinc-200">
+                            Key metrics
+                          </h3>
+                          {keyMetrics.length === 0 ? (
+                            <p className="mt-1 text-xs text-zinc-500">
+                              Tidak ada metrik kunci yang cukup jelas dari cuplikan dokumen ini.
+                            </p>
+                          ) : (
+                            <ul className="mt-2 space-y-2">
+                              {keyMetrics.map((k, i) => (
+                                <li
+                                  key={i}
+                                  className="flex justify-between gap-2 border-b border-zinc-800/80 pb-2 font-mono text-[11px]"
+                                >
+                                  <span className="text-zinc-500">{k.label}</span>
+                                  <span className="text-right text-teal-400">
+                                    {k.value}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </section>
+                        <section>
+                          <h3 className="font-semibold text-zinc-200">
+                            Kualitas bisnis
+                          </h3>
+                          <p className="mt-1 leading-relaxed text-zinc-400">
+                            {ins.businessQualitySummary ||
+                              "Ringkasan kualitas bisnis tidak tersedia untuk dokumen ini."}
+                          </p>
+                        </section>
+                      </>
+                    );
+                  })()}
                   <button
                     type="button"
                     onClick={() => void deleteDocument(selectedDoc.id)}
                     className="text-[11px] text-red-400 hover:underline"
                   >
-                    Delete document
+                    Hapus dokumen
                   </button>
                 </div>
               )}

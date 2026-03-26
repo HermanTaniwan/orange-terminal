@@ -7,6 +7,7 @@ import { splitIntoChunks } from "./chunk";
 import { embedTexts } from "./openrouter";
 import { toVectorParam } from "./vector";
 import { generateAndStoreInsights } from "./insights";
+import { inferDocumentName } from "./inferDocumentName";
 
 const EMBED_BATCH = 24;
 
@@ -35,6 +36,45 @@ export async function processDocument(args: {
         [args.documentId, "No extractable text in file"]
       );
       return;
+    }
+
+    // Try to rename the document based on detected context (Annual/Quarterly/Monthly + year/month).
+    // This is best-effort and must never break ingestion.
+    try {
+      const { suggestedFileName, confidence } = await inferDocumentName({
+        originalFileName: args.fileName,
+        textSample: trimmed.slice(0, 12000),
+      });
+
+      const lowerOriginalName = args.fileName.toLowerCase();
+      const hasPublicExpose =
+        /public\s*(expose|exposure)|paparan\s*publik|expose\s*publik/.test(
+          lowerOriginalName
+        );
+
+      if (
+        suggestedFileName &&
+        confidence >= 0.9 &&
+        suggestedFileName.length > 0
+      ) {
+        // Extra safety: if the original clearly says "public expose",
+        // never allow rename into an Annual/Quarterly/Monthly template.
+        if (hasPublicExpose) {
+          const lowerSuggested = suggestedFileName.toLowerCase();
+          const matchesPublicExpose =
+            /paparan\s*publik|public\s*expose/.test(lowerSuggested);
+          if (!matchesPublicExpose) {
+            return;
+          }
+        }
+
+        await pool.query(`UPDATE documents SET file_name = $2 WHERE id = $1`, [
+          args.documentId,
+          suggestedFileName,
+        ]);
+      }
+    } catch (renameErr) {
+      console.error("Auto-rename inference failed:", renameErr);
     }
 
     await pool.query(

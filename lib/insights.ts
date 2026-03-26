@@ -13,13 +13,13 @@ function stripJsonFence(s: string): string {
 export async function generateInsightsFromText(
   textSample: string
 ): Promise<DocumentInsights> {
-  const system = `You are a skeptical value investing analyst. Output ONLY valid JSON with this exact shape (no markdown):
+  const system = `Kamu adalah analis value investing yang skeptis. Output HANYA valid JSON dengan bentuk persis ini (tanpa markdown). Semua teks di dalam JSON harus berbahasa Indonesia:
 {"redFlags":["string"],"keyMetrics":[{"label":"string","value":"string"}],"businessQualitySummary":"string"}
 Rules:
-- redFlags: concrete risk items grounded in the text; use empty array if none found.
-- keyMetrics: only metrics explicitly present or clearly inferable; otherwise short qualitative items.
-- businessQualitySummary: 2-4 sentences on moat, capital intensity, and earnings quality based on the text.
-If the excerpt is insufficient, still return best-effort empty or cautious items.`;
+- redFlags: butir risiko yang spesifik dan berdasar pada teks; gunakan array kosong jika tidak ada.
+- keyMetrics: hanya metrik yang disebut eksplisit atau bisa disimpulkan secara jelas; jika tidak ada metrik kuantitatif, gunakan item kualitatif yang singkat.
+- businessQualitySummary: 2-4 kalimat tentang moat, intensitas modal, dan kualitas laba berdasarkan teks.
+Jika cuplikan tidak cukup, tetap berikan hasil terbaik: boleh array kosong atau item yang hati-hati.`;
 
   const user = `Document excerpt:\n\n${textSample}`;
 
