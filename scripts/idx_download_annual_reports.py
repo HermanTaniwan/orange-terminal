@@ -806,10 +806,16 @@ def main():
 
     opts = Options()
     opts.add_argument("--start-maximized")
+    # Kurangi jejak otomasi (banyak situs memperlakukan headless berbeda dari windowed).
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
     if args.headless:
         opts.add_argument("--headless=new")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1920,1080")
     prefs = {
         "download.default_directory": str(out_dir),
         "download.prompt_for_download": False,
