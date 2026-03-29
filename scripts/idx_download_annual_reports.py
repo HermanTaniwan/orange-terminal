@@ -3,7 +3,9 @@ import http.client
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -824,8 +826,19 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     start_ts = time.time()
 
+    # Profil unik per proses — hindari "user data directory is already in use" (VPS / job paralel).
+    profile_dir = tempfile.mkdtemp(prefix="idx-chrome-")
+    driver = None
     opts = Options()
+    opts.add_argument(f"--user-data-dir={profile_dir}")
+    opts.page_load_strategy = "eager"
     opts.add_argument("--start-maximized")
+    # Linux / Docker / VPS: sering wajib agar Chrome stabil (bukan hanya mode headless).
+    if sys.platform.startswith("linux"):
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        if not args.headless:
+            opts.add_argument("--window-size=1920,1080")
     # Kurangi jejak otomasi (banyak situs memperlakukan headless berbeda dari windowed).
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
@@ -849,18 +862,19 @@ def main():
         opts.binary_location = chrome_bin
         print(f"Chrome binary: {chrome_bin}")
     elif sys.platform.startswith("linux"):
+        shutil.rmtree(profile_dir, ignore_errors=True)
         raise RuntimeError(
             "Chrome/Chromium tidak ditemukan. Di VPS: sudo apt install -y chromium-browser "
             "(atau google-chrome-stable), atau set env CHROME_BIN=/path/ke/chromium"
         )
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=opts,
-    )
-    driver.set_script_timeout(120)
-    driver.set_page_load_timeout(60)
-
     try:
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts,
+        )
+        driver.set_script_timeout(120)
+        driver.set_page_load_timeout(60)
+
         driver.get("https://idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi/")
         if args.wait_seconds > 0:
             print("Selesaikan challenge manual di browser.")
@@ -1166,7 +1180,12 @@ def main():
             out_json.parent.mkdir(parents=True, exist_ok=True)
             out_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     finally:
-        driver.quit()
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
