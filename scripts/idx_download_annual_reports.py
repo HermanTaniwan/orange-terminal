@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -15,6 +16,25 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+
+
+def resolve_chrome_binary() -> str:
+    """Path ke Google Chrome / Chromium. VPS sering tidak punya 'google-chrome' di PATH default Selenium."""
+    for key in ("CHROME_BIN", "CHROMIUM_BIN"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw and os.path.isfile(raw) and os.access(raw, os.X_OK):
+            return raw
+    for p in (
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+    ):
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return ""
+
 
 # Bulan ID lengkap + singkatan EN; panjang dulu (maret sebelum mar) agar "Maret 2025" terdeteksi.
 _IDX_MONTH_SHORT_YEAR_RE = re.compile(
@@ -824,6 +844,15 @@ def main():
         "safebrowsing.enabled": True,
     }
     opts.add_experimental_option("prefs", prefs)
+    chrome_bin = resolve_chrome_binary()
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+        print(f"Chrome binary: {chrome_bin}")
+    elif sys.platform.startswith("linux"):
+        raise RuntimeError(
+            "Chrome/Chromium tidak ditemukan. Di VPS: sudo apt install -y chromium-browser "
+            "(atau google-chrome-stable), atau set env CHROME_BIN=/path/ke/chromium"
+        )
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=opts,
