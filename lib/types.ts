@@ -8,12 +8,17 @@ export type DocumentRow = {
   char_count: number | null;
   insights_json: DocumentInsights | null;
   created_at: string;
+  /** Soft-deleted: hidden from UI; file & chunks kept for reuse on re-ingest. */
+  deleted_at?: string | null;
+  idx_source_url?: string | null;
+  /** IDX GetAnnouncement pengumuman.Id2 */
+  idx_announcement_id?: string | null;
 };
 
 export type DocumentInsights = {
+  importantInfo: string[];
   redFlags: string[];
   keyMetrics: { label: string; value: string }[];
-  businessQualitySummary: string;
 };
 
 export type ChatSource = {
@@ -40,6 +45,10 @@ export type ProjectRow = {
   ticker_symbol: string | null;
   exchange: string | null;
   industry_topic: string | null;
+  ingest_status?: "queued" | "running" | "completed" | "failed" | null;
+  ingest_error?: string | null;
+  ingest_metrics?: Record<string, unknown> | null;
+  ingest_updated_at?: string | null;
   created_at: string;
 };
 
@@ -59,11 +68,32 @@ export type IdxLargestAttachment = {
   sizeBytes: number;
 };
 
-export type IdxLargestAttachmentResponse = {
+/** Satu pengumuman: satu PDF terpilih (terbesar di dalam pengumuman itu). */
+export type IdxAnnouncementPdfPick = {
+  title: string;
+  publishedAt: string;
   selected: IdxLargestAttachment | null;
-  candidatesCount: number;
+  candidatesInAnnouncement: number;
   sizedCount: number;
   failedCount: number;
-  topCandidates: IdxLargestAttachment[];
+  /** Blok teks {Pengumuman / Date / Output PDF} untuk tampilan */
+  outputBlock?: string;
+};
+
+export type IdxExcludedAnnouncement = {
+  title: string;
+  publishedAt: string;
+  matchedExclude: string;
+};
+
+export type IdxLargestAttachmentResponse = {
+  announcements: IdxAnnouncementPdfPick[];
+  candidatesCount: number;
+  /** Pengumuman yang dilewati karena judul cocok daftar pengecualian */
+  excludedAnnouncementsCount?: number;
+  /** Detail pengumuman yang diabaikan (filter judul) */
+  excludedAnnouncements?: IdxExcludedAnnouncement[];
+  sizedCount: number;
+  failedCount: number;
   error?: string;
 };

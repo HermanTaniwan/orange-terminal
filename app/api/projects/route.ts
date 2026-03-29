@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
+import {
+  enqueueEmitenIngestJob,
+  ensureEmitenIngestPollerStarted,
+  getLatestEmitenIngestJobsByProject,
+} from "@/lib/emitenIngestWorker";
 
 export const runtime = "nodejs";
 
@@ -11,13 +16,25 @@ function normalizeProjectType(input: unknown): ProjectType {
 
 export async function GET() {
   try {
+    ensureEmitenIngestPollerStarted();
     const pool = getPool();
     const { rows } = await pool.query(
       `SELECT id, name, description, project_type, ticker_symbol, exchange, industry_topic, created_at
        FROM projects
        ORDER BY created_at DESC`
     );
-    return NextResponse.json({ projects: rows });
+    const byProject = await getLatestEmitenIngestJobsByProject(rows.map((r) => r.id as string));
+    const projects = rows.map((r) => {
+      const j = byProject.get(r.id as string);
+      return {
+        ...r,
+        ingest_status: j?.status || null,
+        ingest_error: j?.error_message || null,
+        ingest_metrics: j?.metrics_json || null,
+        ingest_updated_at: j?.updated_at || null,
+      };
+    });
+    return NextResponse.json({ projects });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to list projects";
     return NextResponse.json({ error: msg }, { status: 500 });
@@ -26,6 +43,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    ensureEmitenIngestPollerStarted();
     const body = (await req.json().catch(() => ({}))) as {
       name?: string;
       description?: string | null;
@@ -70,7 +88,14 @@ export async function POST(req: Request) {
         industryTopic,
       ]
     );
-    return NextResponse.json({ project: rows[0] });
+    const project = rows[0];
+    if (projectType === "emiten" && tickerSymbol) {
+      await enqueueEmitenIngestJob({
+        projectId: project.id as string,
+        tickerSymbol,
+      });
+    }
+    return NextResponse.json({ project });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to create project";
     return NextResponse.json({ error: msg }, { status: 500 });

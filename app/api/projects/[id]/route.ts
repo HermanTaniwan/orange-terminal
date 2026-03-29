@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { dirname } from "node:path";
 import { getPool } from "@/lib/db";
 import { removeUploadDirectory } from "@/lib/uploadCleanup";
+import { enqueueEmitenIngestJob, ensureEmitenIngestPollerStarted } from "@/lib/emitenIngestWorker";
 
 export const runtime = "nodejs";
 
@@ -14,6 +15,7 @@ function normalizeProjectType(input: unknown): ProjectType {
 
 export async function PATCH(req: Request, ctx: Ctx) {
   try {
+    ensureEmitenIngestPollerStarted();
     const { id } = await ctx.params;
     const body = (await req.json().catch(() => ({}))) as {
       name?: string;
@@ -96,7 +98,14 @@ export async function PATCH(req: Request, ctx: Ctx) {
     if (!rows[0]) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
-    return NextResponse.json({ project: rows[0] });
+    const project = rows[0];
+    if (project?.project_type === "emiten" && project?.ticker_symbol) {
+      await enqueueEmitenIngestJob({
+        projectId: project.id as string,
+        tickerSymbol: project.ticker_symbol as string,
+      });
+    }
+    return NextResponse.json({ project });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to update project";
     return NextResponse.json({ error: msg }, { status: 500 });

@@ -19,10 +19,11 @@ export async function POST(_req: Request, ctx: Ctx) {
       file_name: string;
       char_count: number | null;
       status: string;
+      sha256: string | null;
     }>(
-      `SELECT file_name, char_count, status
+      `SELECT file_name, char_count, status, sha256
        FROM documents
-       WHERE id = $1::uuid AND project_id = $2::uuid`,
+       WHERE id = $1::uuid AND project_id = $2::uuid AND deleted_at IS NULL`,
       [id, projectId]
     );
     const doc = rows[0];
@@ -49,6 +50,7 @@ export async function POST(_req: Request, ctx: Ctx) {
     const insights = await generateAndStoreInsights({
       documentId: id,
       textSample,
+      sha256: doc.sha256,
     });
     return NextResponse.json({ insights });
   } catch (e) {

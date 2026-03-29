@@ -23,6 +23,12 @@
 # uploads
 /uploads
 
+# local IDX / ingest job output
+.runtime/
+
+# python
+scripts/__pycache__/
+
 # misc
 .DS_Store
 *.pem

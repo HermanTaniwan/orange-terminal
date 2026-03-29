@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
 import { getServerEnv } from "@/lib/env";
@@ -21,9 +22,9 @@ export async function GET(req: Request) {
     }
     const pool = getPool();
     const { rows } = await pool.query(
-      `SELECT id, project_id, file_name, mime_type, status, error_message, char_count, insights_json, created_at
+      `SELECT id, project_id, file_name, mime_type, status, error_message, char_count, insights_json, created_at, idx_announcement_id
        FROM documents
-       WHERE project_id = $1::uuid
+       WHERE project_id = $1::uuid AND deleted_at IS NULL
        ORDER BY created_at DESC`,
       [projectId]
     );
@@ -62,6 +63,7 @@ export async function POST(req: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
+    const sha256 = createHash("sha256").update(buffer).digest("hex");
     const id = randomUUID();
     const root = await ensureUploadRoot();
     const safeName = sanitizeFileName(file.name);
@@ -81,9 +83,9 @@ export async function POST(req: Request) {
     }
 
     await pool.query(
-      `INSERT INTO documents (id, project_id, file_name, mime_type, storage_path, status)
-       VALUES ($1::uuid, $2::uuid, $3, $4, $5, 'pending')`,
-      [id, projectId, file.name, mimeType, storagePath]
+      `INSERT INTO documents (id, project_id, file_name, mime_type, storage_path, status, sha256)
+       VALUES ($1::uuid, $2::uuid, $3, $4, $5, 'pending', $6)`,
+      [id, projectId, file.name, mimeType, storagePath, sha256]
     );
 
     await processDocument({
@@ -94,8 +96,8 @@ export async function POST(req: Request) {
     });
 
     const { rows } = await pool.query(
-      `SELECT id, project_id, file_name, mime_type, status, error_message, char_count, insights_json, created_at
-       FROM documents WHERE id = $1`,
+      `SELECT id, project_id, file_name, mime_type, status, error_message, char_count, insights_json, created_at, idx_announcement_id
+       FROM documents WHERE id = $1 AND deleted_at IS NULL`,
       [id]
     );
     return NextResponse.json({ document: rows[0] });

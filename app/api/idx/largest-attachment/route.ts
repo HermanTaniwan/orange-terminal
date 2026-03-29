@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import {
   extractIdxPdfAttachments,
   fetchIdxAnnouncements,
-  pickLargestIdxAttachment,
+  formatIdxAnnouncementOutputBlock,
+  pickLargestIdxAttachmentPerAnnouncement,
 } from "@/lib/idx";
 
 export const runtime = "nodejs";
@@ -14,10 +15,13 @@ export async function GET(req: Request) {
     const dateFrom = (url.searchParams.get("dateFrom") || "").trim();
     const dateTo = (url.searchParams.get("dateTo") || "").trim();
     const rawKeywords = (url.searchParams.get("keywords") || "").trim();
+    const rawExcludeTitle = (url.searchParams.get("excludeTitle") || "").trim();
     console.log(
       `[IDX] largest-attachment request kodeEmiten=${kodeEmiten || "-"} dateFrom=${
         dateFrom || "-"
-      } dateTo=${dateTo || "-"} keywords=${rawKeywords || "(default)"}`
+      } dateTo=${dateTo || "-"} keywords=${rawKeywords || "(default)"} excludeTitle=${
+        rawExcludeTitle || "(default+env)"
+      }`
     );
     if (!kodeEmiten) {
       return NextResponse.json(
@@ -33,19 +37,29 @@ export async function GET(req: Request) {
           .filter(Boolean)
       : undefined;
 
+    const extraExcludeTitle = rawExcludeTitle
+      ? rawExcludeTitle.split(",").map((x) => x.trim()).filter(Boolean)
+      : undefined;
+
     const replies = await fetchIdxAnnouncements({ kodeEmiten, dateFrom, dateTo });
-    const candidates = extractIdxPdfAttachments(replies, keywords);
-    const { selected, sizedCount, failedCount, all } =
-      await pickLargestIdxAttachment(candidates);
+    const { groups, excludedAnnouncementsCount, excludedAnnouncements } =
+      extractIdxPdfAttachments(replies, keywords, {
+        excludeTitleSubstrings: extraExcludeTitle,
+      });
+    const announcements = await pickLargestIdxAttachmentPerAnnouncement(groups);
+    const candidatesCount = groups.reduce((n, g) => n + g.candidates.length, 0);
+    const sizedCount = announcements.reduce((n, a) => n + a.sizedCount, 0);
+    const failedCount = announcements.reduce((n, a) => n + a.failedCount, 0);
+
     console.log(
       "[IDX] largest-attachment result:",
       JSON.stringify(
         {
-          candidatesCount: candidates.length,
+          announcementsCount: announcements.length,
+          candidatesCount,
+          excludedAnnouncementsCount,
           sizedCount,
           failedCount,
-          selectedFile: selected?.fileName || null,
-          selectedSizeBytes: selected?.sizeBytes ?? null,
         },
         null,
         2
@@ -53,21 +67,28 @@ export async function GET(req: Request) {
     );
 
     return NextResponse.json({
-      selected,
-      candidatesCount: candidates.length,
+      announcements: announcements.map((a) => {
+        const outputPdf = a.selected?.fileName?.trim() || "(tidak ada)";
+        return {
+          title: a.title,
+          publishedAt: a.publishedAt,
+          selected: a.selected,
+          extras: a.extras,
+          candidatesInAnnouncement: a.candidatesInAnnouncement,
+          sizedCount: a.sizedCount,
+          failedCount: a.failedCount,
+          outputBlock: formatIdxAnnouncementOutputBlock({
+            pengumuman: a.title,
+            date: a.publishedAt,
+            outputPdf,
+          }),
+        };
+      }),
+      candidatesCount,
+      excludedAnnouncementsCount,
+      excludedAnnouncements,
       sizedCount,
       failedCount,
-      // keep tiny preview for debug/fallback UI transparency
-      topCandidates: all
-        .sort((a, b) => b.sizeBytes - a.sizeBytes)
-        .slice(0, 5)
-        .map((x) => ({
-          title: x.title,
-          publishedAt: x.publishedAt,
-          fileName: x.fileName,
-          url: x.url,
-          sizeBytes: x.sizeBytes,
-        })),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to query IDX";

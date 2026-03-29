@@ -25,7 +25,7 @@ export async function retrieveChunks(args: {
   documentIds?: string[] | null;
   limit?: number;
 }): Promise<RetrievedChunk[]> {
-  const limit = args.limit ?? 10;
+  const limit = args.limit ?? 5;
   const [qEmb] = await embedTexts([args.query]);
   const vec = toVectorParam(qEmb);
   const pool = getPool();
@@ -49,6 +49,7 @@ export async function retrieveChunks(args: {
      JOIN documents d ON d.id = c.document_id
      WHERE d.status = 'ready'
        AND d.project_id = $2::uuid
+       AND d.deleted_at IS NULL
        ${docFilter}
      ORDER BY c.embedding <=> $1::vector
      LIMIT ${limit}`,

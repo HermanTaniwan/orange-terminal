@@ -55,7 +55,7 @@ export async function POST(req: Request) {
       projectId,
       documentIds:
         body.selectedDocumentIds?.filter((id) => typeof id === "string") || [],
-      limit: 10,
+      limit: 5,
     });
 
     const { answerMarkdown, sources } = await answerWithRag({

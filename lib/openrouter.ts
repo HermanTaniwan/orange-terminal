@@ -27,23 +27,37 @@ export async function chatCompletionJson(args: {
   system: string;
   user: string;
   temperature?: number;
+  model?: string;
 }): Promise<string> {
   const { openRouterApiKey, chatModel } = getServerEnv();
-  const res = await fetch(`${BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${openRouterApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: chatModel,
-      temperature: args.temperature ?? 0.2,
-      messages: [
-        { role: "system", content: args.system },
-        { role: "user", content: args.user },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openRouterApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: args.model?.trim() || chatModel,
+        temperature: args.temperature ?? 0.2,
+        messages: [
+          { role: "system", content: args.system },
+          { role: "user", content: args.user },
+        ],
+      }),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error("OpenRouter chat timeout after 60s");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`OpenRouter chat failed: ${res.status} ${t}`);

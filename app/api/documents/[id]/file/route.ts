@@ -31,7 +31,7 @@ export async function GET(_req: Request, ctx: Ctx) {
     }>(
       `SELECT storage_path, file_name, mime_type
        FROM documents
-       WHERE id = $1::uuid AND project_id = $2::uuid`,
+       WHERE id = $1::uuid AND project_id = $2::uuid AND deleted_at IS NULL`,
       [id, projectId]
     );
 

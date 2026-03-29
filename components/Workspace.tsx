@@ -6,7 +6,6 @@ import type {
   ChatSource,
   ConversationRow,
   DocumentRow,
-  IdxLargestAttachmentResponse,
   MessageRow,
   ProjectRow,
 } from "@/lib/types";
@@ -49,9 +48,8 @@ export function Workspace() {
   const [insightsLoadingId, setInsightsLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [projectFormMode, setProjectFormMode] = useState<ProjectFormMode>(null);
-  const [idxCode, setIdxCode] = useState("");
-  const [idxLoading, setIdxLoading] = useState(false);
-  const [idxResult, setIdxResult] = useState<IdxLargestAttachmentResponse | null>(null);
+  const [reingestLoading, setReingestLoading] = useState(false);
+  const [backfillIdxNamesLoading, setBackfillIdxNamesLoading] = useState(false);
   const [projectDraft, setProjectDraft] = useState<ProjectDraft>({
     name: "",
     description: "",
@@ -87,48 +85,139 @@ export function Workspace() {
     return projects.find((p) => p.id === selectedProjectId) ?? null;
   }, [projects, selectedProjectId]);
 
-  useEffect(() => {
-    if (selectedProject?.project_type === "emiten" && selectedProject.ticker_symbol) {
-      setIdxCode(selectedProject.ticker_symbol);
+  const emitenIngestStage = useMemo(() => {
+    if (!selectedProject || selectedProject.project_type !== "emiten") return "";
+    const metrics = (selectedProject.ingest_metrics || {}) as Record<string, unknown>;
+    const stage = typeof metrics.stage === "string" ? metrics.stage : "";
+    const processed =
+      typeof metrics.processedCandidates === "number" ? metrics.processedCandidates : null;
+    const total = typeof metrics.totalCandidates === "number" ? metrics.totalCandidates : null;
+    if (processed !== null && total !== null && total > 0) {
+      return `${stage || "Sedang memproses"} (${processed}/${total})`;
     }
-  }, [selectedProject?.id, selectedProject?.project_type, selectedProject?.ticker_symbol]);
+    return stage;
+  }, [selectedProject]);
+
+  const emitenIngestDetails = useMemo(() => {
+    const metrics = (selectedProject?.ingest_metrics || {}) as Record<string, unknown>;
+    return {
+      downloadingFile:
+        typeof metrics.downloadingFile === "string" ? metrics.downloadingFile : "",
+      embeddingFile: typeof metrics.embeddingFile === "string" ? metrics.embeddingFile : "",
+      duplicateReadyCount:
+        typeof metrics.duplicateReadyCount === "number" ? metrics.duplicateReadyCount : 0,
+      skipNoFileCount:
+        typeof metrics.skipNoFileCount === "number" ? metrics.skipNoFileCount : 0,
+      skipDuplicateProjectCount:
+        typeof metrics.skipDuplicateProjectCount === "number"
+          ? metrics.skipDuplicateProjectCount
+          : 0,
+      skipUnsupportedCount:
+        typeof metrics.skipUnsupportedCount === "number" ? metrics.skipUnsupportedCount : 0,
+      skippedCount: typeof metrics.skippedCount === "number" ? metrics.skippedCount : 0,
+    };
+  }, [selectedProject]);
 
   const conversationStorageKey = useMemo(() => {
     if (!selectedProjectId) return null;
     return `${LS_CONV_PREFIX}${selectedProjectId}`;
   }, [selectedProjectId]);
 
-  const refreshProjects = useCallback(async () => {
-    const res = await fetch("/api/projects");
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to load projects");
-    setProjects(data.projects || []);
-    return (data.projects || []) as ProjectRow[];
+  const refreshProjects = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
+    try {
+      const res = await fetch("/api/projects");
+      const data = (await res.json().catch(() => ({}))) as { error?: string; projects?: unknown };
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to load projects");
+      }
+      const next = (data.projects || []) as ProjectRow[];
+      setProjects((prev) => {
+        const same =
+          prev.length === next.length &&
+          prev.every((p, i) => {
+            const n = next[i];
+            return (
+              p.id === n.id &&
+              p.name === n.name &&
+              p.project_type === n.project_type &&
+              p.ticker_symbol === n.ticker_symbol &&
+              p.ingest_status === n.ingest_status &&
+              p.ingest_updated_at === n.ingest_updated_at
+            );
+          });
+        return same ? prev : next;
+      });
+      return next;
+    } catch (e) {
+      if (!silent) {
+        setError(e instanceof Error ? e.message : "Failed to load projects");
+      }
+      return null;
+    }
   }, []);
 
   const refreshConversations = useCallback(async () => {
     if (!selectedProjectId) return;
-    const res = await fetch(`/api/conversations?projectId=${selectedProjectId}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to load conversations");
-    setConversations(data.conversations || []);
+    try {
+      const res = await fetch(`/api/conversations?projectId=${selectedProjectId}`);
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        conversations?: unknown;
+      };
+      if (!res.ok) throw new Error(data.error || "Failed to load conversations");
+      setConversations((data.conversations || []) as ConversationRow[]);
+    } catch {
+      /* avoid unhandled rejection when dev server restarts or network drops */
+    }
   }, [selectedProjectId]);
 
-  const refreshDocuments = useCallback(async () => {
+  const refreshDocuments = useCallback(async (opts?: { silent?: boolean }) => {
     if (!selectedProjectId) return;
-    setLoadingDocs(true);
-    setError(null);
+    const silent = opts?.silent === true;
+    if (!silent) {
+      setLoadingDocs(true);
+      setError(null);
+    }
     try {
       const res = await fetch(`/api/documents?projectId=${selectedProjectId}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load documents");
-      setDocuments(data.documents || []);
+      const next = (data.documents || []) as DocumentRow[];
+      setDocuments((prev) => {
+        const same =
+          prev.length === next.length &&
+          prev.every((d, i) => {
+            const n = next[i];
+            const dInsights = d.insights_json ? JSON.stringify(d.insights_json) : "";
+            const nInsights = n.insights_json ? JSON.stringify(n.insights_json) : "";
+            return (
+              d.id === n.id &&
+              d.status === n.status &&
+              d.file_name === n.file_name &&
+              d.created_at === n.created_at &&
+              d.error_message === n.error_message &&
+              d.char_count === n.char_count &&
+              dInsights === nInsights
+            );
+          });
+        return same ? prev : next;
+      });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load documents");
+      if (!silent) setError(e instanceof Error ? e.message : "Failed to load documents");
     } finally {
-      setLoadingDocs(false);
+      if (!silent) setLoadingDocs(false);
     }
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProject || selectedProject.project_type !== "emiten") return;
+    const t = setInterval(() => {
+      void refreshProjects({ silent: true });
+      void refreshDocuments({ silent: true });
+    }, 10000);
+    return () => clearInterval(t);
+  }, [selectedProject?.id, selectedProject?.project_type, refreshProjects, refreshDocuments]);
 
   const loadConversation = useCallback(
     async (id: string) => {
@@ -160,6 +249,7 @@ export function Workspace() {
     void (async () => {
       try {
         const rows = await refreshProjects();
+        if (rows === null) return;
         if (rows.length === 0) {
           const createRes = await fetch("/api/projects", {
             method: "POST",
@@ -284,6 +374,7 @@ export function Workspace() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to save project");
       const rows = await refreshProjects();
+      if (!rows) return;
       const nextId =
         (data.project?.id as string | undefined) ||
         (isCreate
@@ -317,6 +408,7 @@ export function Workspace() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to delete project");
       const rows = await refreshProjects();
+      if (!rows) return;
       const next = rows[0]?.id || null;
       setSelectedProjectId(next);
     } catch (e) {
@@ -397,36 +489,51 @@ export function Workspace() {
     xhr.send(fd);
   };
 
-  const fetchLargestFromIdx = async () => {
-    const kodeEmiten = idxCode.trim().toUpperCase();
-    if (!kodeEmiten) {
-      setError("Kode emiten wajib diisi untuk tarik data IDX.");
-      return;
-    }
-    setIdxLoading(true);
+  const triggerProjectReingest = async () => {
+    if (!selectedProjectId) return;
+    setReingestLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({
-        kodeEmiten,
+      const res = await fetch(`/api/projects/${selectedProjectId}/reingest`, {
+        method: "POST",
       });
-      const res = await fetch(`/api/idx/largest-attachment?${params.toString()}`);
-      const data = (await res.json()) as IdxLargestAttachmentResponse;
-      if (!res.ok) throw new Error(data.error || "Failed to fetch IDX data");
-      setIdxResult(data);
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error || "Gagal trigger re-ingest");
+      await refreshProjects();
     } catch (e) {
-      setIdxResult(null);
-      const msg = e instanceof Error ? e.message : "Failed to fetch IDX data";
-      if (/403|blocked/i.test(msg)) {
-        setError(
-          "IDX menolak akses dari server ini (403). Coba ganti network/VPS atau jalankan dari server dengan IP yang tidak diblokir."
-        );
-      } else {
-        setError(msg);
-      }
+      setError(e instanceof Error ? e.message : "Gagal trigger re-ingest");
     } finally {
-      setIdxLoading(false);
+      setReingestLoading(false);
     }
   };
+
+  const triggerBackfillIdxFileNames = async () => {
+    if (!selectedProjectId) return;
+    setBackfillIdxNamesLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${selectedProjectId}/backfill-idx-filenames`, {
+        method: "POST",
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        updated?: number;
+        cacheHit?: boolean;
+        hint?: string;
+      };
+      if (!res.ok) throw new Error(data.error || "Backfill nama gagal");
+      if (!data.cacheHit && data.hint) {
+        setError(data.hint);
+      }
+      await refreshProjects();
+      await refreshDocuments();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Backfill nama gagal");
+    } finally {
+      setBackfillIdxNamesLoading(false);
+    }
+  };
+
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -636,6 +743,63 @@ export function Workspace() {
                 Hapus
               </button>
             </div>
+            {selectedProject?.project_type === "emiten" ? (
+              <div className="flex items-center gap-2">
+                <span className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                  Auto-ingest: {selectedProject.ingest_status || "idle"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void triggerProjectReingest()}
+                  disabled={!selectedProjectId || reingestLoading}
+                  className="rounded border border-indigo-800/50 px-2 py-0.5 text-[10px] text-indigo-300 hover:bg-indigo-950/40 disabled:opacity-40"
+                >
+                  {reingestLoading ? "Triggering..." : "Re-ingest"}
+                </button>
+                <button
+                  type="button"
+                  title="Samakan nama file dengan cache IDX lokal (OriginalFilename)"
+                  onClick={() => void triggerBackfillIdxFileNames()}
+                  disabled={!selectedProjectId || backfillIdxNamesLoading}
+                  className="rounded border border-zinc-600 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800/60 disabled:opacity-40"
+                >
+                  {backfillIdxNamesLoading ? "…" : "Sync nama IDX"}
+                </button>
+              </div>
+            ) : null}
+            {selectedProject?.project_type === "emiten" && emitenIngestStage ? (
+              <p className="text-[10px] text-zinc-400">Progress: {emitenIngestStage}</p>
+            ) : null}
+            {selectedProject?.project_type === "emiten" && emitenIngestDetails.downloadingFile ? (
+              <p className="text-[10px] text-zinc-500">
+                Downloading: {emitenIngestDetails.downloadingFile}
+              </p>
+            ) : null}
+            {selectedProject?.project_type === "emiten" && emitenIngestDetails.embeddingFile ? (
+              <p className="text-[10px] text-zinc-500">
+                Embedding: {emitenIngestDetails.embeddingFile}
+              </p>
+            ) : null}
+            {selectedProject?.project_type === "emiten" &&
+            (emitenIngestDetails.duplicateReadyCount > 0 ||
+              emitenIngestDetails.skipDuplicateProjectCount > 0 ||
+              emitenIngestDetails.skipNoFileCount > 0 ||
+              emitenIngestDetails.skipUnsupportedCount > 0) ? (
+              <p className="text-[10px] text-zinc-500">
+                Skip reasons - duplicate cached: {emitenIngestDetails.duplicateReadyCount}, already in
+                project: {emitenIngestDetails.skipDuplicateProjectCount}, missing file:{" "}
+                {emitenIngestDetails.skipNoFileCount}, unsupported:{" "}
+                {emitenIngestDetails.skipUnsupportedCount}
+              </p>
+            ) : null}
+            {selectedProject?.project_type === "emiten" && selectedProject.ingest_updated_at ? (
+              <p className="text-[10px] text-zinc-500">
+                Last update: {formatUploadedAt(selectedProject.ingest_updated_at)}
+              </p>
+            ) : null}
+            {selectedProject?.project_type === "emiten" && selectedProject.ingest_error ? (
+              <p className="text-[10px] text-red-300">{selectedProject.ingest_error}</p>
+            ) : null}
             {selectedProjectId === DEFAULT_PROJECT_ID ? (
               <p className="text-[10px] leading-snug text-zinc-500">
                 Project bawaan tidak dapat dihapus. Pakai <span className="text-teal-500">New</span>{" "}
@@ -737,48 +901,6 @@ export function Workspace() {
                 </div>
               </div>
             ) : null}
-            <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
-              <p className="text-[11px] font-medium text-zinc-200">Tarik data IDX</p>
-              <div className="flex gap-2">
-                <input
-                  value={idxCode}
-                  onChange={(e) => setIdxCode(e.target.value.toUpperCase())}
-                  placeholder="Kode Emiten (contoh: CASS)"
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-100"
-                />
-                <button
-                  type="button"
-                  onClick={() => void fetchLargestFromIdx()}
-                  disabled={idxLoading}
-                  className="rounded border border-teal-800/50 px-2 py-1 text-[11px] text-teal-300 hover:bg-teal-950/40 disabled:opacity-40"
-                >
-                  {idxLoading ? "Loading..." : "Tarik"}
-                </button>
-              </div>
-              {idxResult?.selected ? (
-                <div className="space-y-1 rounded border border-zinc-800 bg-zinc-950/40 p-2 text-[10px]">
-                  <p className="font-medium text-zinc-200">{idxResult.selected.fileName}</p>
-                  <p className="text-zinc-500">{idxResult.selected.title}</p>
-                  <p className="text-zinc-500">
-                    {idxResult.selected.sizeBytes >= 0
-                      ? `${(idxResult.selected.sizeBytes / 1024 / 1024).toFixed(2)} MB`
-                      : "Ukuran file tidak terdeteksi (fallback heuristik)."}
-                  </p>
-                  <a
-                    href={idxResult.selected.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-teal-400 hover:underline"
-                  >
-                    Buka PDF
-                  </a>
-                </div>
-              ) : idxResult ? (
-                <p className="text-[10px] text-zinc-500">
-                  Tidak ada attachment PDF yang cocok untuk filter saat ini.
-                </p>
-              ) : null}
-            </div>
           </div>
 
           <div className="border-b border-zinc-800 p-3">
@@ -1115,7 +1237,7 @@ export function Workspace() {
             <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-3">
               {!selectedDoc ? (
                 <p className="text-xs text-zinc-500">
-                  Select one document to view red flags, metrics, and business quality notes.
+                  Select one document to view important info, red flags, and key metrics.
                 </p>
               ) : selectedDoc.status !== "ready" ? (
                 <p className="text-xs text-zinc-500">
@@ -1129,10 +1251,27 @@ export function Workspace() {
                 <div className="space-y-4 text-xs">
                   {(() => {
                     const ins = selectedDoc.insights_json;
+                    const importantInfo = ins.importantInfo || [];
                     const redFlags = ins.redFlags || [];
                     const keyMetrics = ins.keyMetrics || [];
                     return (
                       <>
+                        <section>
+                          <h3 className="font-semibold text-zinc-200">
+                            Important info
+                          </h3>
+                          {importantInfo.length === 0 ? (
+                            <p className="mt-1 text-xs text-zinc-500">
+                              Tidak ada poin penting yang cukup jelas dari cuplikan dokumen ini.
+                            </p>
+                          ) : (
+                            <ul className="mt-1 list-disc space-y-1 pl-4 text-zinc-400">
+                              {importantInfo.map((r, i) => (
+                                <li key={i}>{r}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </section>
                         <section>
                           <h3 className="font-semibold text-red-400">
                             Red flags
@@ -1172,15 +1311,6 @@ export function Workspace() {
                               ))}
                             </ul>
                           )}
-                        </section>
-                        <section>
-                          <h3 className="font-semibold text-zinc-200">
-                            Kualitas bisnis
-                          </h3>
-                          <p className="mt-1 leading-relaxed text-zinc-400">
-                            {ins.businessQualitySummary ||
-                              "Ringkasan kualitas bisnis tidak tersedia untuk dokumen ini."}
-                          </p>
                         </section>
                       </>
                     );

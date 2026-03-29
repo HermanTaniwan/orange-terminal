@@ -1,7 +1,5 @@
-import { dirname } from "node:path";
 import { NextResponse } from "next/server";
 import { getPool } from "@/lib/db";
-import { removeUploadDirectory } from "@/lib/uploadCleanup";
 
 export const runtime = "nodejs";
 
@@ -16,17 +14,16 @@ export async function DELETE(_req: Request, ctx: Ctx) {
       return NextResponse.json({ error: "projectId is required" }, { status: 400 });
     }
     const pool = getPool();
-    const { rows } = await pool.query<{ storage_path: string }>(
-      `SELECT storage_path
-       FROM documents
-       WHERE id = $1::uuid AND project_id = $2::uuid`,
+    const { rows } = await pool.query(
+      `UPDATE documents
+       SET deleted_at = now()
+       WHERE id = $1::uuid AND project_id = $2::uuid AND deleted_at IS NULL
+       RETURNING id`,
       [id, projectId]
     );
     if (!rows[0]) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    await removeUploadDirectory(dirname(rows[0].storage_path));
-    await pool.query(`DELETE FROM documents WHERE id = $1::uuid`, [id]);
     return NextResponse.json({ ok: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Delete failed";
@@ -64,7 +61,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
     const { rows } = await pool.query(
       `UPDATE documents
        SET file_name = $2
-       WHERE id = $1::uuid AND project_id = $3::uuid
+       WHERE id = $1::uuid AND project_id = $3::uuid AND deleted_at IS NULL
        RETURNING id`,
       [id, fileName, projectId]
     );
